@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { supabase } from "./lib/supabase";
 import ContentFactory from "./ContentFactory";
+import Distribution from "./Distribution";
 
 // ============================================================
 // CONSTANTS & CONFIG
@@ -183,7 +184,7 @@ export default function App() {
   const [isWriting, setIsWriting] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [syncError, setSyncError] = useState("");
-  const [view, setView] = useState("pipeline"); // pipeline | command | content_factory
+  const [view, setView] = useState("pipeline"); // pipeline | command | content_factory | distribution
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showKillModal, setShowKillModal] = useState(null);
@@ -466,6 +467,7 @@ export default function App() {
           <NavTab active={view === "pipeline"} onClick={() => setView("pipeline")} label="Pipeline" icon="◉" />
           <NavTab active={view === "command"} onClick={() => setView("command")} label="Command Center" icon="◎" />
           <NavTab active={view === "content_factory"} onClick={() => setView("content_factory")} label="Content Factory" icon="🎬" />
+          <NavTab active={view === "distribution"} onClick={() => setView("distribution")} label="Distribution" icon="📡" />
         </div>
         <button
           onClick={() => setShowAddModal(true)}
@@ -548,6 +550,7 @@ export default function App() {
               <CommandCenter stats={stats} products={products} deadProducts={deadProducts} onSelect={setSelectedProduct} />
             )}
             {view === "content_factory" && <ContentFactory />}
+            {view === "distribution" && <Distribution />}
           </>
         )}
       </div>
