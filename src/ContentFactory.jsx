@@ -70,6 +70,7 @@ export default function ContentFactory() {
   const [angles, setAngles] = useState([]);
   const [batches, setBatches] = useState([]);
   const [batchAngles, setBatchAngles] = useState([]);
+  const [batchHasProductColumn, setBatchHasProductColumn] = useState(true);
   const [assignSelection, setAssignSelection] = useState({});
 
   const [isSyncing, setIsSyncing] = useState(true);
@@ -139,11 +140,37 @@ export default function ContentFactory() {
       return false;
     }
 
-    const { data: batchData, error: batchError } = await supabase
-      .from("filming_batches")
-      .select("*")
-      .eq("product_id", productId)
-      .order("scheduled_date", { ascending: true });
+    let batchData = null;
+    let batchError = null;
+
+    if (batchHasProductColumn) {
+      const batchRes = await supabase
+        .from("filming_batches")
+        .select("*")
+        .eq("product_id", productId)
+        .order("scheduled_date", { ascending: true });
+      batchData = batchRes.data;
+      batchError = batchRes.error;
+
+      // Some schemas don't include filming_batches.product_id.
+      // Fall back to a global batch list in that case.
+      if (batchError?.message?.includes("column filming_batches.product_id does not exist")) {
+        setBatchHasProductColumn(false);
+        const fallbackRes = await supabase
+          .from("filming_batches")
+          .select("*")
+          .order("scheduled_date", { ascending: true });
+        batchData = fallbackRes.data;
+        batchError = fallbackRes.error;
+      }
+    } else {
+      const batchRes = await supabase
+        .from("filming_batches")
+        .select("*")
+        .order("scheduled_date", { ascending: true });
+      batchData = batchRes.data;
+      batchError = batchRes.error;
+    }
 
     if (batchError) {
       pushToast(`Could not load batches: ${batchError.message}`, "error");
@@ -176,7 +203,7 @@ export default function ContentFactory() {
     setBatchAngles(junctionData || []);
     setIsSyncing(false);
     return true;
-  }, [pushToast]);
+  }, [batchHasProductColumn, pushToast]);
 
   useEffect(() => {
     const timerId = setTimeout(() => {
@@ -336,13 +363,24 @@ export default function ContentFactory() {
     }
 
     await withWrite(async () => {
-      const { error } = await supabase.from("filming_batches").insert({
+      const basePayload = {
         ...batchForm,
-        product_id: selectedProductId,
         status: batchForm.status || "planned",
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-      });
+      };
+
+      const firstPayload = batchHasProductColumn
+        ? { ...basePayload, product_id: selectedProductId }
+        : basePayload;
+
+      let { error } = await supabase.from("filming_batches").insert(firstPayload);
+
+      if (error?.message?.includes("column filming_batches.product_id does not exist")) {
+        setBatchHasProductColumn(false);
+        const retry = await supabase.from("filming_batches").insert(basePayload);
+        error = retry.error;
+      }
 
       if (error) {
         pushToast(`Could not create batch: ${error.message}`, "error");
