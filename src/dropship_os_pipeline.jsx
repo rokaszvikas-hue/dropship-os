@@ -2265,42 +2265,140 @@ function FieldGroup({ label, children }) {
 }
 
 function EditableInput({ value, onChange, placeholder, style: extraStyle }) {
+  const [draft, setDraft] = useState(value || "");
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      const timerId = setTimeout(() => {
+        setDraft(value || "");
+      }, 0);
+      return () => clearTimeout(timerId);
+    }
+  }, [value, isFocused]);
+
+  const commit = useCallback(() => {
+    const next = draft || "";
+    const current = value || "";
+    if (next !== current) {
+      onChange(next);
+    }
+  }, [draft, value, onChange]);
+
   return (
     <input
-      value={value || ""}
-      onChange={e => onChange(e.target.value)}
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
       placeholder={placeholder}
       style={{ ...inputStyle, ...extraStyle }}
-      onFocus={e => e.target.style.borderColor = "#e94560"}
-      onBlur={e => e.target.style.borderColor = "#1e293b"}
+      onFocus={e => {
+        setIsFocused(true);
+        e.target.style.borderColor = "#e94560";
+      }}
+      onBlur={e => {
+        setIsFocused(false);
+        e.target.style.borderColor = "#1e293b";
+        commit();
+      }}
+      onKeyDown={e => {
+        if (e.key === "Enter") {
+          e.currentTarget.blur();
+        }
+      }}
     />
   );
 }
 
 function EditableTextArea({ value, onChange, placeholder }) {
+  const [draft, setDraft] = useState(value || "");
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      const timerId = setTimeout(() => {
+        setDraft(value || "");
+      }, 0);
+      return () => clearTimeout(timerId);
+    }
+  }, [value, isFocused]);
+
+  const commit = useCallback(() => {
+    const next = draft || "";
+    const current = value || "";
+    if (next !== current) {
+      onChange(next);
+    }
+  }, [draft, value, onChange]);
+
   return (
     <textarea
-      value={value || ""}
-      onChange={e => onChange(e.target.value)}
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
       placeholder={placeholder}
       style={{ ...inputStyle, minHeight: 60, resize: "vertical" }}
-      onFocus={e => e.target.style.borderColor = "#e94560"}
-      onBlur={e => e.target.style.borderColor = "#1e293b"}
+      onFocus={e => {
+        setIsFocused(true);
+        e.target.style.borderColor = "#e94560";
+      }}
+      onBlur={e => {
+        setIsFocused(false);
+        e.target.style.borderColor = "#1e293b";
+        commit();
+      }}
+      onKeyDown={e => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+          e.currentTarget.blur();
+        }
+      }}
     />
   );
 }
 
 function EditableNumber({ value, onChange, prefix }) {
+  const [draft, setDraft] = useState(value ?? "");
+  const [isFocused, setIsFocused] = useState(false);
+
+  useEffect(() => {
+    if (!isFocused) {
+      const timerId = setTimeout(() => {
+        setDraft(value ?? "");
+      }, 0);
+      return () => clearTimeout(timerId);
+    }
+  }, [value, isFocused]);
+
+  const commit = useCallback(() => {
+    const text = String(draft).trim();
+    const next = text === "" ? null : Number(text);
+    const normalizedNext = Number.isFinite(next) ? next : null;
+    const normalizedCurrent = value ?? null;
+    if (normalizedNext !== normalizedCurrent) {
+      onChange(normalizedNext);
+    }
+  }, [draft, value, onChange]);
+
   return (
     <div style={{ position: "relative" }}>
       {prefix && <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "#475569", fontSize: 12 }}>{prefix}</span>}
       <input
         type="number"
-        value={value ?? ""}
-        onChange={e => onChange(e.target.value ? parseFloat(e.target.value) : null)}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
         style={{ ...inputStyle, paddingLeft: prefix ? 28 : 12 }}
-        onFocus={e => e.target.style.borderColor = "#e94560"}
-        onBlur={e => e.target.style.borderColor = "#1e293b"}
+        onFocus={e => {
+          setIsFocused(true);
+          e.target.style.borderColor = "#e94560";
+        }}
+        onBlur={e => {
+          setIsFocused(false);
+          e.target.style.borderColor = "#1e293b";
+          commit();
+        }}
+        onKeyDown={e => {
+          if (e.key === "Enter") {
+            e.currentTarget.blur();
+          }
+        }}
       />
     </div>
   );
