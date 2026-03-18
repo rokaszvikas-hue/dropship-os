@@ -867,133 +867,635 @@ function ProductCard({ product: p, onSelect, onAdvance, onKill }) {
 // ============================================================
 // COMMAND CENTER
 // ============================================================
-function CommandCenter({ stats, products, deadProducts, onSelect }) {
-  const holdProducts = products.filter(p => {
-    const score = p.score_total ?? calcWeightedScore(p);
-    return score !== null && score >= 60 && score < 75 && !hasCriticalFail(p) && p.stage === "scored";
+function CommandCenter({ onSelect }) {
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState("");
+  const [data, setData] = useState({
+    products: [],
+    videos: [],
+    publications: [],
+    supportTickets: [],
+    dailyRevenue: [],
+    publishingTargets: [],
   });
 
-  const actionItems = [];
-  products.forEach(p => {
-    if (p.stage === "dead") return;
-    const days = daysSince(p.stage_entered_at);
-    if (p.stage === "sourced" && days > 1) actionItems.push({ product: p, msg: "Needs quick screen", urgency: "medium" });
-    if (p.stage === "quick_screen" && days > 1) actionItems.push({ product: p, msg: "Needs scoring", urgency: "medium" });
-    if (p.stage === "scored" && days > 2) actionItems.push({ product: p, msg: "Score pending too long", urgency: "high" });
-    if (p.stage === "sample_ordered" && days > 14) actionItems.push({ product: p, msg: "Sample overdue — check supplier", urgency: "high" });
-    if (p.stage === "sample_review" && days > 2) actionItems.push({ product: p, msg: "Sample review overdue", urgency: "high" });
-    if (holdProducts.find(h => h.id === p.id) && days > 7) actionItems.push({ product: p, msg: "Hold expired — kill or approve", urgency: "critical" });
-  });
+  const defaultTargets = useMemo(
+    () => ({
+      tiktok: { daily_target: 2, weekly_target: 14 },
+      instagram: { daily_target: 1, weekly_target: 7 },
+      youtube: { daily_target: 1, weekly_target: 7 },
+      facebook: { daily_target: 1, weekly_target: 7 },
+    }),
+    []
+  );
 
-  // Death log analysis
-  const killsByStage = {};
-  deadProducts.forEach(p => {
-    const s = p.killed_at_stage || "unknown";
-    killsByStage[s] = (killsByStage[s] || 0) + 1;
-  });
+  const getWeekStart = useCallback((dateLike) => {
+    const d = new Date(dateLike);
+    const day = d.getDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    d.setDate(d.getDate() + diff);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }, []);
+
+  const refreshDashboard = useCallback(async () => {
+    setRefreshing(true);
+    setError("");
+    const [productsRes, videosRes, pubsRes, supportRes, revenueRes, targetsRes] = await Promise.all([
+      supabase.from("products").select("*"),
+      supabase.from("videos").select("*"),
+      supabase.from("publications").select("*"),
+      supabase.from("support_tickets").select("*"),
+      supabase.from("daily_revenue").select("*"),
+      supabase.from("publishing_targets").select("*"),
+    ]);
+
+    const errors = [
+      productsRes.error?.message,
+      videosRes.error?.message,
+      pubsRes.error?.message,
+      supportRes.error?.message,
+      revenueRes.error?.message,
+      targetsRes.error?.message,
+    ].filter(Boolean);
+
+    if (errors.length > 0) {
+      setError(`Failed to load some dashboard data: ${errors[0]}`);
+    }
+
+    setData({
+      products: productsRes.data || [],
+      videos: videosRes.data || [],
+      publications: pubsRes.data || [],
+      supportTickets: supportRes.data || [],
+      dailyRevenue: revenueRes.data || [],
+      publishingTargets: targetsRes.data || [],
+    });
+    setRefreshing(false);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      void refreshDashboard();
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [refreshDashboard]);
+
+  const now = useMemo(() => new Date(), []);
+  const monthStart = useMemo(() => new Date(now.getFullYear(), now.getMonth(), 1), [now]);
+  const thisWeekStart = useMemo(() => getWeekStart(now), [getWeekStart, now]);
+  const nextWeekStart = useMemo(() => {
+    const d = new Date(thisWeekStart);
+    d.setDate(d.getDate() + 7);
+    return d;
+  }, [thisWeekStart]);
+  const prevWeekStart = useMemo(() => {
+    const d = new Date(thisWeekStart);
+    d.setDate(d.getDate() - 7);
+    return d;
+  }, [thisWeekStart]);
+
+  const products = data.products;
+  const videos = data.videos;
+  const publications = data.publications;
+  const supportTickets = data.supportTickets;
+  const dailyRevenue = data.dailyRevenue;
+
+  const productById = useMemo(() => {
+    const map = {};
+    products.forEach((p) => {
+      map[p.id] = p;
+    });
+    return map;
+  }, [products]);
+
+  const revenueThisMonth = useMemo(() => {
+    return dailyRevenue.reduce((sum, row) => {
+      const d = new Date(row.date || 0);
+      if (Number.isNaN(d.getTime()) || d < monthStart) return sum;
+      return sum + Number(row.net_revenue ?? (Number(row.gross_revenue || 0) - Number(row.refunds || 0)));
+    }, 0);
+  }, [dailyRevenue, monthStart]);
+
+  const revenueTarget = 100000;
+  const revenueProgressPct = Math.min(100, Math.round((revenueThisMonth / revenueTarget) * 100));
+
+  const productsInPipeline = useMemo(
+    () => products.filter((p) => !["dead", "live"].includes(p.stage)).length,
+    [products]
+  );
+  const productsLive = useMemo(() => products.filter((p) => p.stage === "live").length, [products]);
+
+  const videosPublishedThisWeek = useMemo(
+    () =>
+      publications.filter((p) => {
+        const d = new Date(p.published_at || 0);
+        return !Number.isNaN(d.getTime()) && d >= thisWeekStart && d < nextWeekStart;
+      }).length,
+    [publications, thisWeekStart, nextWeekStart]
+  );
+
+  const openSupportTickets = useMemo(
+    () =>
+      supportTickets.filter((t) =>
+        ["open", "in_progress", "waiting_customer", "waiting_supplier"].includes(t.status)
+      ).length,
+    [supportTickets]
+  );
+
+  const actionItems = useMemo(() => {
+    const items = [];
+
+    products.forEach((p) => {
+      if (p.stage === "sourced" && daysSince(p.stage_entered_at) > 1) {
+        items.push({
+          id: `product-sourced-${p.id}`,
+          product: p,
+          title: p.name,
+          msg: "Needs quick screen",
+          urgency: "medium",
+        });
+      }
+
+      if (p.stage === "scored") {
+        const score = p.score_total ?? calcWeightedScore(p);
+        if (score !== null && score >= 60 && score <= 74 && daysSince(p.stage_entered_at) > 7) {
+          items.push({
+            id: `product-hold-${p.id}`,
+            product: p,
+            title: p.name,
+            msg: "Hold expired — kill or approve",
+            urgency: "critical",
+          });
+        }
+      }
+
+      if (p.stage === "sample_ordered" && daysSince(p.stage_entered_at) > 14) {
+        items.push({
+          id: `product-sample-ordered-${p.id}`,
+          product: p,
+          title: p.name,
+          msg: "Sample overdue",
+          urgency: "high",
+        });
+      }
+
+      if (p.stage === "sample_review" && daysSince(p.stage_entered_at) > 2) {
+        items.push({
+          id: `product-sample-review-${p.id}`,
+          product: p,
+          title: p.name,
+          msg: "Sample review overdue",
+          urgency: "high",
+        });
+      }
+    });
+
+    videos.forEach((v) => {
+      if (v.status === "filmed" && daysSince(v.filmed_at || v.updated_at || v.created_at) > 2) {
+        items.push({
+          id: `video-filmed-${v.id}`,
+          title: v.name || "Untitled video",
+          msg: "Needs editing",
+          urgency: "high",
+        });
+      }
+      if (v.status === "edited" && daysSince(v.updated_at || v.created_at) > 1) {
+        items.push({
+          id: `video-edited-${v.id}`,
+          title: v.name || "Untitled video",
+          msg: "Ready to publish",
+          urgency: "medium",
+        });
+      }
+    });
+
+    supportTickets.forEach((t) => {
+      if (t.status === "open" && daysSince(t.created_at || t.updated_at) > 2) {
+        items.push({
+          id: `ticket-open-${t.id}`,
+          title: t.order_number ? `Order #${t.order_number}` : t.customer_name || "Support ticket",
+          msg: "Support ticket aging",
+          urgency: "high",
+        });
+      }
+    });
+
+    const rank = { critical: 0, high: 1, medium: 2 };
+    return items.sort((a, b) => rank[a.urgency] - rank[b.urgency]);
+  }, [products, videos, supportTickets]);
+
+  const cadenceData = useMemo(() => {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const mergedTargets = { ...defaultTargets };
+    data.publishingTargets.forEach((row) => {
+      const k = String(row.platform || "").toLowerCase();
+      if (mergedTargets[k]) {
+        mergedTargets[k] = {
+          daily_target: row.daily_target ?? mergedTargets[k].daily_target,
+          weekly_target: row.weekly_target ?? mergedTargets[k].weekly_target,
+        };
+      }
+    });
+
+    const result = {};
+    Object.keys(mergedTargets).forEach((k) => {
+      result[k] = { today: 0, week: 0, ...mergedTargets[k] };
+    });
+
+    publications.forEach((pub) => {
+      const k = String(pub.platform || "").toLowerCase();
+      if (!result[k]) return;
+      const d = new Date(pub.published_at || 0);
+      if (Number.isNaN(d.getTime())) return;
+      if (d >= todayStart) result[k].today += 1;
+      if (d >= thisWeekStart && d < nextWeekStart) result[k].week += 1;
+    });
+
+    return result;
+  }, [data.publishingTargets, defaultTargets, publications, thisWeekStart, nextWeekStart]);
+
+  const pipelineByStage = useMemo(() => {
+    const byStage = {};
+    STAGES.forEach((s) => {
+      byStage[s.id] = products.filter((p) => p.stage === s.id).length;
+    });
+    return byStage;
+  }, [products]);
+
+  const totalPipelineCount = useMemo(
+    () => STAGES.reduce((sum, s) => sum + (pipelineByStage[s.id] || 0), 0),
+    [pipelineByStage]
+  );
+
+  const contentOutput = useMemo(() => {
+    const statuses = ["concept", "scripted", "filming_ready", "filmed", "editing", "edited", "published"];
+    const counts = {};
+    statuses.forEach((s) => {
+      counts[s] = videos.filter((v) => v.status === s).length;
+    });
+
+    const publishedThisWeek = videos.filter((v) => {
+      if (v.status !== "published") return false;
+      const d = new Date(v.published_at || 0);
+      return !Number.isNaN(d.getTime()) && d >= thisWeekStart && d < nextWeekStart;
+    }).length;
+
+    const publishedLastWeek = videos.filter((v) => {
+      if (v.status !== "published") return false;
+      const d = new Date(v.published_at || 0);
+      return !Number.isNaN(d.getTime()) && d >= prevWeekStart && d < thisWeekStart;
+    }).length;
+
+    return { counts, publishedThisWeek, publishedLastWeek };
+  }, [videos, thisWeekStart, nextWeekStart, prevWeekStart]);
+
+  const deadProducts = useMemo(
+    () =>
+      products
+        .filter((p) => p.stage === "dead")
+        .sort(
+          (a, b) =>
+            new Date(b.killed_at || b.updated_at || 0).getTime() -
+            new Date(a.killed_at || a.updated_at || 0).getTime()
+        ),
+    [products]
+  );
+
+  const killsByStage = useMemo(() => {
+    const map = {};
+    deadProducts.forEach((p) => {
+      const s = p.killed_at_stage || "unknown";
+      map[s] = (map[s] || 0) + 1;
+    });
+    return map;
+  }, [deadProducts]);
+
+  const weeklyRevenueTrend = useMemo(() => {
+    const points = [];
+    for (let i = 7; i >= 0; i -= 1) {
+      const start = new Date(thisWeekStart);
+      start.setDate(start.getDate() - i * 7);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 7);
+      const value = dailyRevenue.reduce((sum, row) => {
+        const d = new Date(row.date || 0);
+        if (Number.isNaN(d.getTime()) || d < start || d >= end) return sum;
+        return sum + Number(row.net_revenue ?? (Number(row.gross_revenue || 0) - Number(row.refunds || 0)));
+      }, 0);
+      points.push({
+        label: `${start.getMonth() + 1}/${start.getDate()}`,
+        value,
+      });
+    }
+    const max = points.reduce((m, p) => Math.max(m, p.value), 0);
+    return { points, max };
+  }, [dailyRevenue, thisWeekStart]);
+
+  const topPerformers = useMemo(() => {
+    return publications
+      .filter((p) => {
+        const d = new Date(p.published_at || 0);
+        return !Number.isNaN(d.getTime()) && d >= monthStart;
+      })
+      .sort((a, b) => Number(b.views_current || 0) - Number(a.views_current || 0))
+      .slice(0, 5);
+  }, [publications, monthStart]);
+
+  if (loading) {
+    return <CommandCenterSkeleton />;
+  }
 
   return (
-    <div style={{ maxWidth: 1200, margin: "0 auto" }}>
-      {/* Top Stats */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 24 }}>
-        <StatCard label="IN PIPELINE" value={stats.inPipeline} subtitle="Being evaluated" color="#3b82f6" />
-        <StatCard label="READY / LIVE" value={stats.readyOrLive} subtitle="Generating revenue" color="#10b981" />
-        <StatCard label="DEAD" value={stats.deadCount} subtitle={`${stats.killRate}% kill rate`} color="#ef4444" />
-        <StatCard label="TOTAL TRACKED" value={stats.totalProducts} subtitle="All time" color="#8b5cf6" />
-      </div>
-
-      {/* Pipeline Stage Breakdown */}
-      <div style={{ background: "#0f0f1a", border: "1px solid #1e293b", borderRadius: 12, padding: 20, marginBottom: 16 }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", letterSpacing: "0.08em", marginBottom: 16 }}>PIPELINE BREAKDOWN</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {STAGES.map(s => (
-            <div key={s.id} style={{ flex: 1, textAlign: "center" }}>
-              <div style={{ fontSize: 24, fontWeight: 800, color: s.color }}>{stats.byStage[s.id]}</div>
-              <div style={{ fontSize: 9, color: "#475569", letterSpacing: "0.06em", marginTop: 4 }}>{s.label.toUpperCase()}</div>
-            </div>
-          ))}
+    <div style={{ maxWidth: 1380, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#64748b", letterSpacing: "0.08em" }}>
+          COMMAND CENTER — LIVE DASHBOARD
         </div>
+        <button onClick={() => void refreshDashboard()} style={commandGhostButtonStyle}>
+          {refreshing ? "Refreshing..." : "↻ Refresh"}
+        </button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-        {/* Action Items */}
-        <div style={{ background: "#0f0f1a", border: "1px solid #1e293b", borderRadius: 12, padding: 20 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", letterSpacing: "0.08em", marginBottom: 16 }}>
-            ⚡ ACTION ITEMS ({actionItems.length})
-          </div>
+      {error && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "10px 12px",
+            borderRadius: 8,
+            background: "rgba(239, 68, 68, 0.12)",
+            border: "1px solid rgba(239, 68, 68, 0.35)",
+            color: "#fca5a5",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {/* Top Metrics */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 10, marginBottom: 14 }}>
+        <CommandMetricCard
+          label="REVENUE THIS MONTH"
+          value={`$${Math.round(revenueThisMonth).toLocaleString()}`}
+          subtitle="From daily_revenue"
+          color="#10b981"
+        />
+        <CommandMetricCard
+          label="REVENUE TARGET"
+          value={`${revenueProgressPct}%`}
+          subtitle={`$100,000 target • ${Math.round(revenueThisMonth).toLocaleString()} achieved`}
+          color={revenueProgressPct >= 100 ? "#10b981" : revenueProgressPct >= 70 ? "#f59e0b" : "#ef4444"}
+          progress={revenueProgressPct}
+        />
+        <CommandMetricCard
+          label="PRODUCTS IN PIPELINE"
+          value={productsInPipeline}
+          subtitle="Not dead / not live"
+          color="#3b82f6"
+        />
+        <CommandMetricCard label="PRODUCTS LIVE" value={productsLive} subtitle="Stage = live" color="#10b981" />
+        <CommandMetricCard
+          label="VIDEOS PUBLISHED THIS WEEK"
+          value={videosPublishedThisWeek}
+          subtitle="From publications table"
+          color="#8b5cf6"
+        />
+        <CommandMetricCard
+          label="OPEN SUPPORT TICKETS"
+          value={openSupportTickets}
+          subtitle="open / in progress / waiting"
+          color="#ef4444"
+        />
+      </div>
+
+      {/* Row 2 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>⚡ ACTION ITEMS ({actionItems.length})</div>
           {actionItems.length === 0 ? (
             <div style={{ color: "#334155", fontSize: 12, fontStyle: "italic" }}>All clear — nothing overdue</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {actionItems.map((item, i) => (
-                <div key={i} onClick={() => onSelect(item.product)} style={{
-                  background: "#141420",
-                  border: `1px solid ${item.urgency === "critical" ? "#7f1d1d" : item.urgency === "high" ? "#78350f" : "#1e293b"}`,
-                  borderRadius: 8,
-                  padding: "10px 14px",
-                  cursor: "pointer",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  transition: "border-color 0.15s",
-                }}
-                onMouseEnter={e => e.currentTarget.style.borderColor = "#e94560"}
-                onMouseLeave={e => e.currentTarget.style.borderColor = item.urgency === "critical" ? "#7f1d1d" : item.urgency === "high" ? "#78350f" : "#1e293b"}
+            <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+              {actionItems.map((item) => (
+                <div
+                  key={item.id}
+                  onClick={() => item.product && onSelect && onSelect(item.product)}
+                  style={{
+                    background: "#141420",
+                    border: `1px solid ${
+                      item.urgency === "critical"
+                        ? "#7f1d1d"
+                        : item.urgency === "high"
+                          ? "#78350f"
+                          : "#3f3f46"
+                    }`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    cursor: "pointer",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    transition: "all 0.15s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = "#e94560";
+                    e.currentTarget.style.transform = "translateY(-1px)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor =
+                      item.urgency === "critical"
+                        ? "#7f1d1d"
+                        : item.urgency === "high"
+                          ? "#78350f"
+                          : "#3f3f46";
+                    e.currentTarget.style.transform = "translateY(0)";
+                  }}
                 >
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 600 }}>{item.product.name}</div>
-                    <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>{item.msg}</div>
+                    <div style={{ fontSize: 12, fontWeight: 700 }}>{item.title}</div>
+                    <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{item.msg}</div>
                   </div>
-                  <span style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    padding: "2px 8px",
-                    borderRadius: 4,
-                    background: item.urgency === "critical" ? "#7f1d1d" : item.urgency === "high" ? "#78350f" : "#1e293b",
-                    color: item.urgency === "critical" ? "#fca5a5" : item.urgency === "high" ? "#fcd34d" : "#94a3b8",
-                  }}>
-                    {item.urgency.toUpperCase()}
-                  </span>
+                  <UrgencyBadge urgency={item.urgency} />
                 </div>
               ))}
             </div>
           )}
         </div>
 
-        {/* Death Log Summary */}
-        <div style={{ background: "#0f0f1a", border: "1px solid #1e293b", borderRadius: 12, padding: 20 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#64748b", letterSpacing: "0.08em", marginBottom: 16 }}>
-            💀 DEATH LOG — KILLS BY STAGE
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>📣 PUBLISHING CADENCE</div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {Object.entries(cadenceData).map(([platform, row]) => {
+              const dayRatio = row.daily_target > 0 ? row.today / row.daily_target : 0;
+              const weekRatio = row.weekly_target > 0 ? row.week / row.weekly_target : 0;
+              const pretty = platform.charAt(0).toUpperCase() + platform.slice(1);
+              return (
+                <div key={platform} style={{ border: "1px solid #1e293b", borderRadius: 8, padding: 8, background: "#111322" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 5 }}>
+                    <span style={{ color: "#cbd5e1", fontWeight: 700 }}>{pretty}</span>
+                    <span style={{ color: "#94a3b8" }}>
+                      {row.today}/{row.daily_target} today • {row.week}/{row.weekly_target} week
+                    </span>
+                  </div>
+                  <MiniProgress ratio={dayRatio} />
+                  <div style={{ height: 4 }} />
+                  <MiniProgress ratio={weekRatio} />
+                </div>
+              );
+            })}
           </div>
+        </div>
+      </div>
+
+      {/* Row 3 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>PIPELINE BREAKDOWN</div>
+          <div style={{ display: "flex", height: 14, borderRadius: 999, overflow: "hidden", border: "1px solid #1e293b" }}>
+            {STAGES.map((s) => {
+              const c = pipelineByStage[s.id] || 0;
+              const width = totalPipelineCount > 0 ? (c / totalPipelineCount) * 100 : 0;
+              return <div key={s.id} style={{ width: `${width}%`, background: s.color, minWidth: c > 0 ? 10 : 0 }} />;
+            })}
+          </div>
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            {STAGES.map((s) => (
+              <div key={s.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span style={{ color: s.color, fontWeight: 700 }}>{s.label}</span>
+                <span style={{ color: "#cbd5e1" }}>{pipelineByStage[s.id] || 0}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>CONTENT OUTPUT</div>
+          <div style={{ display: "grid", gap: 6 }}>
+            {["concept", "scripted", "filming_ready", "filmed", "editing", "edited", "published"].map((s) => (
+              <div key={s} style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }}>
+                <span style={{ color: "#94a3b8" }}>{s}</span>
+                <span style={{ color: "#e2e8f0", fontWeight: 700 }}>{contentOutput.counts[s] || 0}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginTop: 10, borderTop: "1px solid #1e293b", paddingTop: 10, fontSize: 11 }}>
+            <span style={{ color: "#94a3b8" }}>Published this week vs last week: </span>
+            <span
+              style={{
+                color:
+                  contentOutput.publishedThisWeek > contentOutput.publishedLastWeek
+                    ? "#10b981"
+                    : contentOutput.publishedThisWeek < contentOutput.publishedLastWeek
+                      ? "#ef4444"
+                      : "#94a3b8",
+                fontWeight: 700,
+              }}
+            >
+              {contentOutput.publishedThisWeek} vs {contentOutput.publishedLastWeek}{" "}
+              {contentOutput.publishedThisWeek > contentOutput.publishedLastWeek
+                ? "↑"
+                : contentOutput.publishedThisWeek < contentOutput.publishedLastWeek
+                  ? "↓"
+                  : "→"}
+            </span>
+          </div>
+        </div>
+
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>💀 DEATH LOG SUMMARY</div>
           {deadProducts.length === 0 ? (
             <div style={{ color: "#334155", fontSize: 12, fontStyle: "italic" }}>No dead products yet</div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {Object.entries(killsByStage).map(([stage, count]) => {
-                const stageInfo = STAGES.find(s => s.id === stage) || DEAD_STAGE;
-                return (
-                  <div key={stage} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ width: 100, fontSize: 11, color: stageInfo.color, fontWeight: 600 }}>
-                      {stageInfo.label || stage}
+            <>
+              <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+                {Object.entries(killsByStage).map(([stage, count]) => {
+                  const stageInfo = STAGES.find((s) => s.id === stage) || DEAD_STAGE;
+                  return (
+                    <div key={stage} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <div style={{ width: 90, fontSize: 11, color: stageInfo.color, fontWeight: 700 }}>
+                        {stageInfo.label || stage}
+                      </div>
+                      <div style={{ flex: 1, height: 7, background: "#1e293b", borderRadius: 999, overflow: "hidden" }}>
+                        <div
+                          style={{
+                            width: `${(count / deadProducts.length) * 100}%`,
+                            height: "100%",
+                            background: "#ef4444",
+                          }}
+                        />
+                      </div>
+                      <span style={{ fontSize: 11, color: "#ef4444", fontWeight: 700 }}>{count}</span>
                     </div>
-                    <div style={{ flex: 1, height: 8, background: "#1e293b", borderRadius: 4, overflow: "hidden" }}>
-                      <div style={{ width: `${(count / deadProducts.length) * 100}%`, height: "100%", background: "#ef4444", borderRadius: 4 }} />
-                    </div>
-                    <span style={{ fontSize: 12, fontWeight: 700, color: "#ef4444", minWidth: 20 }}>{count}</span>
-                  </div>
-                );
-              })}
-              <div style={{ marginTop: 12, borderTop: "1px solid #1e293b", paddingTop: 12 }}>
-                <div style={{ fontSize: 10, color: "#475569", fontWeight: 600, marginBottom: 8 }}>RECENT KILLS</div>
-                {deadProducts.slice(0, 5).map(p => (
-                  <div key={p.id} onClick={() => onSelect(p)} style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4, cursor: "pointer" }}
-                    onMouseEnter={e => e.currentTarget.style.color = "#e94560"}
-                    onMouseLeave={e => e.currentTarget.style.color = "#94a3b8"}
+                  );
+                })}
+              </div>
+              <div style={{ borderTop: "1px solid #1e293b", paddingTop: 10 }}>
+                <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, marginBottom: 6 }}>RECENT 5 KILLS</div>
+                {deadProducts.slice(0, 5).map((p) => (
+                  <div
+                    key={p.id}
+                    onClick={() => onSelect && onSelect(p)}
+                    style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4, cursor: "pointer" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = "#e94560")}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = "#94a3b8")}
                   >
-                    <span style={{ color: "#ef4444" }}>✕</span> {p.name} — {p.kill_reason || "no reason"}
+                    <span style={{ color: "#ef4444" }}>✕</span> {p.name || "Unknown"} — {p.kill_reason || "no reason"}
                   </div>
                 ))}
               </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom Row */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>WEEKLY REVENUE TREND (LAST 8 WEEKS)</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 160 }}>
+            {weeklyRevenueTrend.points.map((p) => (
+              <div key={p.label} style={{ flex: 1, minWidth: 24 }}>
+                <div
+                  title={`${p.label}: $${Math.round(p.value).toLocaleString()}`}
+                  style={{
+                    width: "100%",
+                    height: `${weeklyRevenueTrend.max > 0 ? Math.max(8, (p.value / weeklyRevenueTrend.max) * 130) : 8}px`,
+                    background: "#10b981",
+                    borderRadius: "6px 6px 0 0",
+                  }}
+                />
+                <div style={{ marginTop: 4, fontSize: 9, color: "#64748b", textAlign: "center" }}>{p.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={commandPanelStyle}>
+          <div style={commandHeaderStyle}>TOP PERFORMERS (THIS MONTH)</div>
+          {topPerformers.length === 0 ? (
+            <div style={{ color: "#334155", fontSize: 12, fontStyle: "italic" }}>No publications this month yet</div>
+          ) : (
+            <div style={{ display: "grid", gap: 8 }}>
+              {topPerformers.map((pub, idx) => (
+                <div key={pub.id || idx} style={{ border: "1px solid #1e293b", borderRadius: 8, padding: "8px 10px", background: "#111322" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700 }}>
+                      {idx + 1}. {pub.title || pub.hook_used || "Untitled"}
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#10b981" }}>
+                      {(Number(pub.views_current || 0)).toLocaleString()} views
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 2 }}>
+                    {(pub.platform || "unknown").toUpperCase()} • {(productById[pub.product_id]?.name || "No linked product")}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -1002,21 +1504,108 @@ function CommandCenter({ stats, products, deadProducts, onSelect }) {
   );
 }
 
-function StatCard({ label, value, subtitle, color }) {
+function CommandCenterSkeleton() {
   return (
-    <div style={{
-      background: "#0f0f1a",
-      border: "1px solid #1e293b",
-      borderRadius: 12,
-      padding: "18px 20px",
-      borderTop: `3px solid ${color}`,
-    }}>
-      <div style={{ fontSize: 9, fontWeight: 700, color: "#475569", letterSpacing: "0.1em" }}>{label}</div>
-      <div style={{ fontSize: 32, fontWeight: 800, color, marginTop: 4, lineHeight: 1 }}>{value}</div>
-      <div style={{ fontSize: 11, color: "#64748b", marginTop: 6 }}>{subtitle}</div>
+    <div style={{ maxWidth: 1380, margin: "0 auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(6, minmax(0, 1fr))", gap: 10, marginBottom: 14 }}>
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} style={{ ...commandPanelStyle, height: 96, background: "#0f0f1a" }} />
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+        <div style={{ ...commandPanelStyle, height: 260 }} />
+        <div style={{ ...commandPanelStyle, height: 260 }} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
+        <div style={{ ...commandPanelStyle, height: 240 }} />
+        <div style={{ ...commandPanelStyle, height: 240 }} />
+        <div style={{ ...commandPanelStyle, height: 240 }} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ ...commandPanelStyle, height: 220 }} />
+        <div style={{ ...commandPanelStyle, height: 220 }} />
+      </div>
     </div>
   );
 }
+
+function CommandMetricCard({ label, value, subtitle, color, progress }) {
+  return (
+    <div
+      style={{
+        background: "#0f0f1a",
+        border: "1px solid #1e293b",
+        borderRadius: 12,
+        padding: "14px 14px",
+        borderTop: `3px solid ${color}`,
+      }}
+    >
+      <div style={{ fontSize: 9, fontWeight: 700, color: "#475569", letterSpacing: "0.08em" }}>{label}</div>
+      <div style={{ fontSize: 24, fontWeight: 800, color, marginTop: 6, lineHeight: 1 }}>{value}</div>
+      <div style={{ fontSize: 10, color: "#64748b", marginTop: 6 }}>{subtitle}</div>
+      {typeof progress === "number" && (
+        <div style={{ marginTop: 8, height: 6, borderRadius: 999, background: "#1e293b", overflow: "hidden" }}>
+          <div style={{ width: `${Math.max(0, Math.min(100, progress))}%`, height: "100%", background: color }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UrgencyBadge({ urgency }) {
+  const bg = urgency === "critical" ? "#7f1d1d" : urgency === "high" ? "#78350f" : "#3f3f46";
+  const fg = urgency === "critical" ? "#fca5a5" : urgency === "high" ? "#fcd34d" : "#fde68a";
+  return (
+    <span
+      style={{
+        fontSize: 9,
+        fontWeight: 700,
+        padding: "2px 8px",
+        borderRadius: 4,
+        background: bg,
+        color: fg,
+      }}
+    >
+      {urgency.toUpperCase()}
+    </span>
+  );
+}
+
+function MiniProgress({ ratio }) {
+  const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+  const color = ratio >= 1 ? "#10b981" : ratio >= 0.7 ? "#f59e0b" : "#ef4444";
+  return (
+    <div style={{ height: 6, borderRadius: 999, background: "#1e293b", overflow: "hidden" }}>
+      <div style={{ width: `${pct}%`, height: "100%", background: color }} />
+    </div>
+  );
+}
+
+const commandPanelStyle = {
+  background: "#0f0f1a",
+  border: "1px solid #1e293b",
+  borderRadius: 12,
+  padding: 14,
+};
+
+const commandHeaderStyle = {
+  fontSize: 11,
+  fontWeight: 700,
+  color: "#64748b",
+  letterSpacing: "0.08em",
+  marginBottom: 12,
+};
+
+const commandGhostButtonStyle = {
+  background: "transparent",
+  color: "#cbd5e1",
+  border: "1px solid #334155",
+  borderRadius: 8,
+  padding: "7px 10px",
+  fontSize: 12,
+  cursor: "pointer",
+  fontFamily: "inherit",
+};
 
 // ============================================================
 // PRODUCT DETAIL MODAL
