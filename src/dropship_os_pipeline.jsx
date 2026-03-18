@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { supabase } from "./lib/supabase";
+import ContentFactory from "./ContentFactory";
 
 // ============================================================
 // CONSTANTS & CONFIG
@@ -179,8 +180,10 @@ function createProductId() {
 export default function App() {
   const [products, setProducts] = useState([]);
   const [isSyncing, setIsSyncing] = useState(true);
+  const [isWriting, setIsWriting] = useState(false);
+  const [toasts, setToasts] = useState([]);
   const [syncError, setSyncError] = useState("");
-  const [view, setView] = useState("pipeline"); // pipeline | command
+  const [view, setView] = useState("pipeline"); // pipeline | command | content_factory
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showKillModal, setShowKillModal] = useState(null);
@@ -188,6 +191,14 @@ export default function App() {
 
   const deadProducts = products.filter(p => p.stage === "dead");
   const liveProducts = products.filter(p => p.stage !== "dead");
+
+  const pushToast = useCallback((message, type = "error") => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    setToasts((prev) => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((toast) => toast.id !== id));
+    }, 4000);
+  }, []);
 
   // Command center stats
   const stats = useMemo(() => {
@@ -211,20 +222,17 @@ export default function App() {
     if (error) {
       console.error("Supabase fetch error:", error.message);
       setSyncError(`Could not load from Supabase: ${error.message}`);
+      pushToast(`Load failed: ${error.message}`, "error");
       setIsSyncing(false);
       return false;
     }
 
     const mapped = (data || []).map(rowToProduct);
     setProducts(mapped);
-    setSelectedProduct((prev) => {
-      if (!prev) return null;
-      return mapped.find((p) => p.id === prev.id) || null;
-    });
     setSyncError("");
     setIsSyncing(false);
     return true;
-  }, []);
+  }, [pushToast]);
 
   useEffect(() => {
     const timerId = setTimeout(() => {
@@ -232,6 +240,20 @@ export default function App() {
     }, 0);
     return () => clearTimeout(timerId);
   }, [fetchProducts]);
+
+  const selectedProductId = selectedProduct?.id ?? null;
+  useEffect(() => {
+    if (!selectedProductId) return;
+    const timerId = setTimeout(() => {
+      const freshSelected = products.find((p) => p.id === selectedProductId) || null;
+      setSelectedProduct((prev) => {
+        if (!prev) return freshSelected;
+        if (!freshSelected) return null;
+        return prev === freshSelected ? prev : freshSelected;
+      });
+    }, 0);
+    return () => clearTimeout(timerId);
+  }, [products, selectedProductId]);
 
   const logProductActivity = useCallback(async ({ productId, action, fromStage = null, toStage = null, meta = {} }) => {
     const attempts = [
@@ -250,41 +272,49 @@ export default function App() {
       lastError = error;
     }
 
-    console.warn("Supabase activity log skipped:", lastError?.message || "unknown error");
+    const activityError = lastError?.message || "unknown error";
+    console.warn("Supabase activity log skipped:", activityError);
+    pushToast(`Activity log failed: ${activityError}`, "error");
     return false;
-  }, []);
+  }, [pushToast]);
 
   const saveProduct = useCallback(async (product, activity = {}) => {
+    setIsWriting(true);
     const payload = productToRow({
       ...product,
       updated_at: new Date().toISOString(),
     });
 
-    const { error } = await supabase
-      .from(PRODUCTS_TABLE)
-      .upsert(payload, { onConflict: "id" });
+    try {
+      const { error } = await supabase
+        .from(PRODUCTS_TABLE)
+        .upsert(payload, { onConflict: "id" });
 
-    if (error) {
-      console.error("Supabase save error:", error.message);
-      setSyncError(`Could not save to Supabase: ${error.message}`);
-      return false;
+      if (error) {
+        console.error("Supabase save error:", error.message);
+        setSyncError(`Could not save to Supabase: ${error.message}`);
+        pushToast(`Save failed: ${error.message}`, "error");
+        return false;
+      }
+
+      setSyncError("");
+      await logProductActivity({
+        productId: payload.id,
+        action: activity.action || "updated",
+        fromStage: activity.fromStage ?? null,
+        toStage: activity.toStage ?? payload.stage ?? null,
+        meta: activity.meta || {},
+      });
+      await fetchProducts();
+      return true;
+    } finally {
+      setIsWriting(false);
     }
-
-    setSyncError("");
-    await logProductActivity({
-      productId: payload.id,
-      action: activity.action || "updated",
-      fromStage: activity.fromStage ?? null,
-      toStage: activity.toStage ?? payload.stage ?? null,
-      meta: activity.meta || {},
-    });
-    await fetchProducts();
-    return true;
-  }, [fetchProducts, logProductActivity]);
+  }, [fetchProducts, logProductActivity, pushToast]);
 
   const updateProduct = useCallback(async (id, updates, activityAction = "updated") => {
     const current = products.find((p) => p.id === id);
-    if (!current) return;
+    if (!current) return false;
 
     const nextUpdatedAt = new Date().toISOString();
     const nextProduct = { ...current, ...updates, updated_at: nextUpdatedAt };
@@ -298,7 +328,7 @@ export default function App() {
       setSelectedProduct(prev => prev ? { ...prev, ...updates, updated_at: nextUpdatedAt } : null);
     }
 
-    await saveProduct(nextProduct, {
+    return await saveProduct(nextProduct, {
       action: activityAction,
       fromStage: current.stage,
       toStage: updates.stage ?? current.stage,
@@ -310,26 +340,32 @@ export default function App() {
     const currentIdx = STAGES.findIndex(s => s.id === product.stage);
     if (currentIdx < STAGES.length - 1) {
       const nextStage = STAGES[currentIdx + 1].id;
-      await updateProduct(
+      const didAdvance = await updateProduct(
         product.id,
         { stage: nextStage, stage_entered_at: new Date().toISOString() },
         "advanced_stage"
       );
+      if (didAdvance) {
+        pushToast(`Advanced to ${nextStage.replace("_", " ")}`, "success");
+      }
     }
-  }, [updateProduct]);
+  }, [updateProduct, pushToast]);
 
   const killProduct = useCallback(async (id, reason) => {
     const product = products.find(p => p.id === id);
     if (!product) return;
-    await updateProduct(id, {
+    const didKill = await updateProduct(id, {
       stage: "dead",
       killed_at: new Date().toISOString(),
       killed_at_stage: product.stage,
       kill_reason: reason,
     }, "killed");
+    if (didKill) {
+      pushToast("Product moved to dead", "success");
+    }
     setShowKillModal(null);
     setSelectedProduct(null);
-  }, [products, updateProduct]);
+  }, [products, updateProduct, pushToast]);
 
   const addProduct = useCallback(async (data) => {
     const newProduct = {
@@ -366,8 +402,9 @@ export default function App() {
     });
     if (didSave) {
       setShowAddModal(false);
+      pushToast("Product added", "success");
     }
-  }, [saveProduct]);
+  }, [saveProduct, pushToast]);
 
   return (
     <div style={{
@@ -376,6 +413,32 @@ export default function App() {
       color: "#e2e8f0",
       fontFamily: "'JetBrains Mono', 'SF Mono', 'Fira Code', monospace",
     }}>
+      <style>{`
+        @keyframes writeProgressSlide {
+          0% { background-position: 200% 0; }
+          100% { background-position: -200% 0; }
+        }
+        @keyframes syncSpinner {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `}</style>
+      {isWriting && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100%",
+            height: 3,
+            zIndex: 2000,
+            background: "linear-gradient(90deg, rgba(233, 69, 96, 0), rgba(233, 69, 96, 0.95), rgba(56, 189, 248, 0.95), rgba(233, 69, 96, 0))",
+            backgroundSize: "220% 100%",
+            animation: "writeProgressSlide 1.1s linear infinite",
+            boxShadow: "0 0 10px rgba(233, 69, 96, 0.4)",
+          }}
+        />
+      )}
       {/* Top Bar */}
       <div style={{
         background: "linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%)",
@@ -402,6 +465,7 @@ export default function App() {
           <div style={{ width: 1, height: 24, background: "#1e293b" }} />
           <NavTab active={view === "pipeline"} onClick={() => setView("pipeline")} label="Pipeline" icon="◉" />
           <NavTab active={view === "command"} onClick={() => setView("command")} label="Command Center" icon="◎" />
+          <NavTab active={view === "content_factory"} onClick={() => setView("content_factory")} label="Content Factory" icon="🎬" />
         </div>
         <button
           onClick={() => setShowAddModal(true)}
@@ -427,47 +491,64 @@ export default function App() {
 
       {/* Main Content */}
       <div style={{ padding: "20px 24px" }}>
-        {isSyncing && (
-          <div style={{
-            marginBottom: 12,
-            padding: "10px 12px",
-            borderRadius: 8,
-            background: "rgba(59, 130, 246, 0.12)",
-            border: "1px solid rgba(59, 130, 246, 0.35)",
-            color: "#93c5fd",
-            fontSize: 12,
-            fontWeight: 600,
-          }}>
-            Syncing with Supabase...
+        {isSyncing ? (
+          <div
+            style={{
+              minHeight: "calc(100vh - 140px)",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 12,
+              color: "#94a3b8",
+            }}
+          >
+            <div
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: "50%",
+                border: "2px solid rgba(148, 163, 184, 0.2)",
+                borderTopColor: "#38bdf8",
+                animation: "syncSpinner 0.8s linear infinite",
+              }}
+            />
+            <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: "0.02em" }}>
+              Loading...
+            </div>
           </div>
-        )}
-        {syncError && (
-          <div style={{
-            marginBottom: 12,
-            padding: "10px 12px",
-            borderRadius: 8,
-            background: "rgba(239, 68, 68, 0.12)",
-            border: "1px solid rgba(239, 68, 68, 0.35)",
-            color: "#fca5a5",
-            fontSize: 12,
-            fontWeight: 600,
-          }}>
-            {syncError}
-          </div>
-        )}
-        {view === "pipeline" && (
-          <PipelineView
-            products={liveProducts}
-            deadProducts={deadProducts}
-            showDead={showDeadProducts}
-            setShowDead={setShowDeadProducts}
-            onSelect={setSelectedProduct}
-            onAdvance={advanceStage}
-            onKill={setShowKillModal}
-          />
-        )}
-        {view === "command" && (
-          <CommandCenter stats={stats} products={products} deadProducts={deadProducts} onSelect={setSelectedProduct} />
+        ) : (
+          <>
+            {syncError && (
+              <div style={{
+                marginBottom: 12,
+                padding: "10px 12px",
+                borderRadius: 8,
+                background: "rgba(239, 68, 68, 0.12)",
+                border: "1px solid rgba(239, 68, 68, 0.35)",
+                color: "#fca5a5",
+                fontSize: 12,
+                fontWeight: 600,
+              }}>
+                {syncError}
+              </div>
+            )}
+            {view === "pipeline" && (
+              <PipelineView
+                products={liveProducts}
+                deadProducts={deadProducts}
+                showDead={showDeadProducts}
+                setShowDead={setShowDeadProducts}
+                onSelect={setSelectedProduct}
+                onAdvance={advanceStage}
+                onKill={setShowKillModal}
+              />
+            )}
+            {view === "command" && (
+              <CommandCenter stats={stats} products={products} deadProducts={deadProducts} onSelect={setSelectedProduct} />
+            )}
+            {view === "content_factory" && <ContentFactory />}
+          </>
         )}
       </div>
 
@@ -491,6 +572,46 @@ export default function App() {
       {showKillModal && (
         <KillModal product={showKillModal} onClose={() => setShowKillModal(null)} onKill={killProduct} />
       )}
+
+      {/* Toasts */}
+      <div
+        style={{
+          position: "fixed",
+          right: 16,
+          bottom: 16,
+          zIndex: 2500,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+          maxWidth: 360,
+        }}
+      >
+        {toasts.map((toast) => (
+          <Toast key={toast.id} message={toast.message} type={toast.type} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Toast({ message, type }) {
+  const isSuccess = type === "success";
+  return (
+    <div
+      style={{
+        background: isSuccess ? "rgba(22, 163, 74, 0.92)" : "rgba(185, 28, 28, 0.92)",
+        border: `1px solid ${isSuccess ? "rgba(74, 222, 128, 0.45)" : "rgba(252, 165, 165, 0.45)"}`,
+        color: "#f8fafc",
+        borderRadius: 10,
+        padding: "10px 12px",
+        fontSize: 12,
+        fontWeight: 600,
+        letterSpacing: "0.01em",
+        boxShadow: "0 10px 30px rgba(0, 0, 0, 0.3)",
+        backdropFilter: "blur(3px)",
+      }}
+    >
+      {message}
     </div>
   );
 }
