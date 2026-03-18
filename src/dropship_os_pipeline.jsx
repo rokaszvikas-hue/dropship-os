@@ -11,7 +11,7 @@ import Management from "./pages/Management";
 // ============================================================
 const STAGES = [
   { id: "sourced", label: "Sourced", color: "#64748b", icon: "🔍" },
-  { id: "quick_screen", label: "Quick Screen", color: "#8b5cf6", icon: "⚡" },
+  { id: "quick_screen", label: "Quick Reject", color: "#8b5cf6", icon: "⚡" },
   { id: "scored", label: "Scored", color: "#3b82f6", icon: "📊" },
   { id: "sample_ordered", label: "Sample Ordered", color: "#f59e0b", icon: "📦" },
   { id: "sample_review", label: "Sample Review", color: "#ef4444", icon: "🔬" },
@@ -50,6 +50,42 @@ const PRODUCT_ACTIVITY_TABLE = "product_activity";
 const PRODUCT_WRITE_COLUMNS = [
   "id",
   "name",
+  "product_code",
+  "decision_status",
+  "priority_rank",
+  "missing_proof",
+  "proof_owner",
+  "proof_revisit_date",
+  "execution_dependence_flag",
+  "proof_exact_lane",
+  "proof_cross_platform",
+  "proof_cross_geo",
+  "proof_summary",
+  "test_order_possible",
+  "test_order_attempted",
+  "test_order_result",
+  "test_order_note",
+  "competitor_1_platform",
+  "competitor_1_geography",
+  "competitor_1_handle",
+  "competitor_1_link",
+  "competitor_1_strength",
+  "competitor_1_branded",
+  "competitor_1_note",
+  "competitor_2_platform",
+  "competitor_2_geography",
+  "competitor_2_handle",
+  "competitor_2_link",
+  "competitor_2_strength",
+  "competitor_2_branded",
+  "competitor_2_note",
+  "competitor_3_platform",
+  "competitor_3_geography",
+  "competitor_3_handle",
+  "competitor_3_link",
+  "competitor_3_strength",
+  "competitor_3_branded",
+  "competitor_3_note",
   "stage",
   "stage_entered_at",
   "created_at",
@@ -89,11 +125,21 @@ const PRODUCT_WRITE_COLUMNS = [
   "aov",
   "cogs",
   "shipping_cost",
+  "economics_confidence",
+  "economics_note",
   "exception_invoked",
   "exception_type",
   "exception_comparable_product",
   "primary_supplier",
   "backup_supplier",
+  "target_market_feasible",
+  "supplier_confidence_note",
+  "source_check_passed",
+  "source_check_notes",
+  "sample_validation_focus",
+  "execution_slot_reserved",
+  "execution_slot_priority",
+  "execution_ready_notes",
   "killed_at",
   "killed_at_stage",
   "kill_reason",
@@ -129,6 +175,24 @@ function getCriticalFails(p) {
   return CRITICAL_FAILS.filter(cf => p[cf.key]).map(cf => cf.label);
 }
 
+function getProductName(p) {
+  return p?.name || p?.product_name || p?.title || "Untitled Product";
+}
+
+function getProductCode(p) {
+  return p?.product_code || p?.sku || p?.code || "NO-CODE";
+}
+
+function createProductCode(name = "") {
+  const clean = String(name || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, "")
+    .trim();
+  const letters = clean.replace(/\s+/g, "").slice(0, 3).padEnd(3, "X");
+  const suffix = Date.now().toString().slice(-4);
+  return `${letters}-${suffix}`;
+}
+
 function daysSince(dateStr) {
   if (!dateStr) return 0;
   return Math.floor((Date.now() - new Date(dateStr).getTime()) / 86400000);
@@ -148,12 +212,34 @@ function rowToProduct(row) {
     ...data,
     ...row,
     id: row.id,
-    name: row.name ?? data.name ?? "Untitled Product",
+    name: row.name ?? data.name ?? row.title ?? "Untitled Product",
+    product_code: row.product_code ?? data.product_code ?? row.sku ?? row.code ?? null,
     stage: row.stage ?? data.stage ?? "sourced",
     stage_entered_at: row.stage_entered_at ?? data.stage_entered_at ?? row.created_at ?? new Date().toISOString(),
     created_at: row.created_at ?? data.created_at ?? new Date().toISOString(),
     updated_at: row.updated_at ?? data.updated_at ?? new Date().toISOString(),
   };
+}
+
+function getDecisionMeta(decisionStatus) {
+  const value = String(decisionStatus || "").toLowerCase();
+  if (value === "hold") return { label: "HOLD", color: "#f59e0b" };
+  if (value === "research_deeper") return { label: "RESEARCH", color: "#38bdf8" };
+  if (value === "approved") return { label: "APPROVED", color: "#10b981" };
+  if (value === "killed") return { label: "KILLED", color: "#ef4444" };
+  return null;
+}
+
+function getMarginMetrics(p) {
+  const aov = Number(p?.aov);
+  const cogs = Number(p?.cogs);
+  const shipping = Number(p?.shipping_cost);
+  if (!Number.isFinite(aov) || !Number.isFinite(cogs) || !Number.isFinite(shipping) || aov <= 0) {
+    return { margin: null, marginPct: null };
+  }
+  const margin = aov - cogs - shipping - (aov * 0.0425);
+  const marginPct = (margin / aov) * 100;
+  return { margin, marginPct };
 }
 
 function productToRow(product) {
@@ -349,6 +435,30 @@ export default function App() {
     const currentIdx = STAGES.findIndex(s => s.id === product.stage);
     if (currentIdx < STAGES.length - 1) {
       const nextStage = STAGES[currentIdx + 1].id;
+      if (product.stage === "scored" && nextStage === "sample_ordered") {
+        const score = product.score_total ?? calcWeightedScore(product);
+        const verdict = getScoreVerdict(score, product);
+        const missing = [];
+
+        if (verdict.label !== "GO") missing.push("score verdict must be GO");
+        if (hasCriticalFail(product)) missing.push("critical fail(s) must be cleared");
+        if (!(Number(product.aov) > 0)) missing.push("AOV must be set (> 0)");
+        if (!(Number(product.cogs) > 0)) missing.push("COGS must be set (> 0)");
+        if (!(Number(product.shipping_cost) >= 0)) missing.push("Shipping cost must be set (>= 0)");
+        if (!String(product.primary_supplier || "").trim()) missing.push("Primary supplier is required");
+        if (product.target_market_feasible !== true) missing.push("Target market feasible must be true");
+
+        const { marginPct } = getMarginMetrics(product);
+        if (marginPct !== null && marginPct < 25) {
+          missing.push(`Margin floor breached (${marginPct.toFixed(1)}% < 25%)`);
+        }
+
+        if (missing.length > 0) {
+          pushToast(`Cannot advance to Sample Ordered: ${missing.join(" • ")}`, "error");
+          return;
+        }
+      }
+
       const didAdvance = await updateProduct(
         product.id,
         { stage: nextStage, stage_entered_at: new Date().toISOString() },
@@ -377,6 +487,7 @@ export default function App() {
   }, [products, updateProduct, pushToast]);
 
   const addProduct = useCallback(async (data) => {
+    const generatedCode = data.product_code?.trim() || createProductCode(data.name);
     const newProduct = {
       id: createProductId(),
       created_at: new Date().toISOString(),
@@ -384,6 +495,7 @@ export default function App() {
       stage: "sourced",
       stage_entered_at: new Date().toISOString(),
       ...data,
+      product_code: generatedCode,
       score_entry_opportunity: null,
       score_organic_fit: null,
       score_business_quality: null,
@@ -402,6 +514,9 @@ export default function App() {
       sample_filmable: null,
       sample_thesis_holds: null,
       sample_deserves_slot: null,
+      source_check_passed: null,
+      target_market_feasible: null,
+      test_order_possible: null,
     };
     const didSave = await saveProduct(newProduct, {
       action: "created",
@@ -768,7 +883,9 @@ function PipelineView({ products, deadProducts, showDead, setShowDead, onSelect,
               onMouseLeave={e => e.currentTarget.style.opacity = "0.7"}
               >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: "#ef4444" }}>{p.name}</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "#ef4444" }}>
+                    {getProductCode(p)} • {getProductName(p)}
+                  </span>
                   <span style={{ fontSize: 10, color: "#64748b" }}>Killed at {p.killed_at_stage}</span>
                 </div>
                 <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 6 }}>{p.kill_reason || "No reason logged"}</div>
@@ -788,6 +905,8 @@ function ProductCard({ product: p, onSelect, onAdvance, onKill }) {
   const score = p.score_total ?? calcWeightedScore(p);
   const days = daysSince(p.stage_entered_at);
   const critFails = getCriticalFails(p);
+  const decisionMeta = getDecisionMeta(p.decision_status);
+  const testOrderAttempted = p.test_order_attempted === true;
 
   return (
     <div
@@ -821,8 +940,29 @@ function ProductCard({ product: p, onSelect, onAdvance, onKill }) {
       )}
 
       {/* Product Name */}
+      <div style={{ fontSize: 10, fontWeight: 700, color: "#64748b", letterSpacing: "0.06em", marginBottom: 3 }}>
+        {getProductCode(p)}
+      </div>
       <div style={{ fontSize: 13, fontWeight: 700, color: "#f1f5f9", marginBottom: 6, lineHeight: 1.3 }}>
-        {p.name}
+        {getProductName(p)}
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+        {decisionMeta && (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: `${decisionMeta.color}20`, color: decisionMeta.color, border: `1px solid ${decisionMeta.color}55`, letterSpacing: "0.05em" }}>
+            {decisionMeta.label}
+          </span>
+        )}
+        {testOrderAttempted && (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#2563eb22", color: "#93c5fd", border: "1px solid #2563eb55" }}>
+            PROOF: {String(p.test_order_result || "n/a").toUpperCase()}
+          </span>
+        )}
+        {p.target_market_feasible === false && (
+          <span style={{ fontSize: 9, fontWeight: 700, padding: "2px 7px", borderRadius: 999, background: "#f59e0b22", color: "#fbbf24", border: "1px solid #f59e0b55" }}>
+            MARKET FLAG
+          </span>
+        )}
       </div>
 
       {/* Score bar */}
@@ -1651,7 +1791,8 @@ function ProductDetail({ product: p, onClose, onUpdate, onAdvance, onKill }) {
           alignItems: "flex-start",
         }}>
           <div>
-            <div style={{ fontSize: 18, fontWeight: 800, color: "#f1f5f9" }}>{p.name}</div>
+            <div style={{ fontSize: 11, color: "#64748b", letterSpacing: "0.06em", fontWeight: 700 }}>{getProductCode(p)}</div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: "#f1f5f9" }}>{getProductName(p)}</div>
             <div style={{ display: "flex", gap: 12, marginTop: 8, alignItems: "center" }}>
               <StageBadge stage={p.stage} />
               {score !== null && (
@@ -1768,6 +1909,9 @@ function StageBadge({ stage }) {
 function OverviewTab({ product: p, onUpdate }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <FieldGroup label="PRODUCT CODE">
+        <EditableInput value={p.product_code} onChange={v => onUpdate({ product_code: v.toUpperCase() })} placeholder="PROD-0000" />
+      </FieldGroup>
       <FieldGroup label="NOTES">
         <EditableTextArea value={p.notes} onChange={v => onUpdate({ notes: v })} placeholder="Add notes about this product..." />
       </FieldGroup>
@@ -1785,7 +1929,7 @@ function OverviewTab({ product: p, onUpdate }) {
           <EditableInput value={p.target_angle} onChange={v => onUpdate({ target_angle: v })} placeholder="Time-saving, frustration removal..." />
         </FieldGroup>
       </div>
-      <FieldGroup label="QUICK SCREEN">
+      <FieldGroup label="QUICK REJECT">
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           <ToggleButton active={p.quick_screen_passed === true} onClick={() => onUpdate({ quick_screen_passed: true })} label="PASS" color="#10b981" />
           <ToggleButton active={p.quick_screen_passed === false} onClick={() => onUpdate({ quick_screen_passed: false })} label="FAIL" color="#ef4444" />
@@ -1838,6 +1982,19 @@ function OverviewTab({ product: p, onUpdate }) {
           </div>
         )}
       </FieldGroup>
+
+      <FieldGroup label="EXECUTION READY CONTROLS">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              <ToggleButton active={p.execution_slot_reserved === true} onClick={() => onUpdate({ execution_slot_reserved: true })} label="Slot Reserved" color="#10b981" small />
+              <ToggleButton active={p.execution_slot_reserved === false} onClick={() => onUpdate({ execution_slot_reserved: false })} label="Slot Not Reserved" color="#ef4444" small />
+            </div>
+            <EditableInput value={p.execution_slot_priority} onChange={v => onUpdate({ execution_slot_priority: v })} placeholder="Priority (high / medium / low)" />
+          </div>
+          <EditableTextArea value={p.execution_ready_notes} onChange={v => onUpdate({ execution_ready_notes: v })} placeholder="Execution-ready notes..." />
+        </div>
+      </FieldGroup>
     </div>
   );
 }
@@ -1848,6 +2005,13 @@ function OverviewTab({ product: p, onUpdate }) {
 function ScoringTab({ product: p, onUpdate }) {
   const score = p.score_total ?? calcWeightedScore(p);
   const verdict = getScoreVerdict(score, p);
+  const isHoldRange = score !== null && score >= 60 && score <= 74;
+  const holdMissing = [];
+  if (isHoldRange) {
+    if (!String(p.missing_proof || "").trim()) holdMissing.push("missing_proof");
+    if (!String(p.proof_owner || "").trim()) holdMissing.push("proof_owner");
+    if (!p.proof_revisit_date) holdMissing.push("proof_revisit_date");
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -1925,6 +2089,130 @@ function ScoringTab({ product: p, onUpdate }) {
           </div>
         );
       })}
+
+      <div style={{ background: "#141420", border: "1px solid #1e293b", borderRadius: 12, padding: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0", marginBottom: 10 }}>Competition & Proof</div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[1, 2, 3].map((idx) => (
+            <div key={idx} style={{ border: "1px solid #1e293b", borderRadius: 10, padding: 10, background: "#0f0f1a" }}>
+              <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.06em", marginBottom: 8 }}>COMPETITOR {idx}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <FieldGroup label="PLATFORM">
+                  <EditableInput value={p[`competitor_${idx}_platform`]} onChange={v => onUpdate({ [`competitor_${idx}_platform`]: v })} placeholder="TikTok / IG / YT..." />
+                </FieldGroup>
+                <FieldGroup label="GEOGRAPHY">
+                  <EditableInput value={p[`competitor_${idx}_geography`]} onChange={v => onUpdate({ [`competitor_${idx}_geography`]: v })} placeholder="US / UK / EU..." />
+                </FieldGroup>
+                <FieldGroup label="HANDLE">
+                  <EditableInput value={p[`competitor_${idx}_handle`]} onChange={v => onUpdate({ [`competitor_${idx}_handle`]: v })} placeholder="@brandname" />
+                </FieldGroup>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 160px 130px", gap: 8, marginTop: 8 }}>
+                <FieldGroup label="LINK">
+                  <EditableInput value={p[`competitor_${idx}_link`]} onChange={v => onUpdate({ [`competitor_${idx}_link`]: v })} placeholder="https://..." />
+                </FieldGroup>
+                <FieldGroup label="STRENGTH">
+                  <select value={p[`competitor_${idx}_strength`] || ""} onChange={e => onUpdate({ [`competitor_${idx}_strength`]: e.target.value || null })} style={inputStyle}>
+                    <option value="">Not set</option>
+                    <option value="weak">weak</option>
+                    <option value="medium">medium</option>
+                    <option value="strong">strong</option>
+                  </select>
+                </FieldGroup>
+                <FieldGroup label="BRANDED">
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <ToggleButton active={p[`competitor_${idx}_branded`] === true} onClick={() => onUpdate({ [`competitor_${idx}_branded`]: true })} label="YES" color="#10b981" small />
+                    <ToggleButton active={p[`competitor_${idx}_branded`] === false} onClick={() => onUpdate({ [`competitor_${idx}_branded`]: false })} label="NO" color="#ef4444" small />
+                  </div>
+                </FieldGroup>
+              </div>
+              <FieldGroup label="NOTE">
+                <EditableInput value={p[`competitor_${idx}_note`]} onChange={v => onUpdate({ [`competitor_${idx}_note`]: v })} placeholder="What makes this competitor relevant?" />
+              </FieldGroup>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ marginTop: 12, border: "1px solid #1e293b", borderRadius: 10, padding: 10, background: "#0f0f1a" }}>
+          <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.06em", marginBottom: 8 }}>PROOF TRACKER</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+            <ToggleButton active={p.proof_exact_lane === true} onClick={() => onUpdate({ proof_exact_lane: p.proof_exact_lane === true ? false : true })} label="Exact lane proof" color="#38bdf8" small />
+            <ToggleButton active={p.proof_cross_platform === true} onClick={() => onUpdate({ proof_cross_platform: p.proof_cross_platform === true ? false : true })} label="Cross-platform proof" color="#38bdf8" small />
+            <ToggleButton active={p.proof_cross_geo === true} onClick={() => onUpdate({ proof_cross_geo: p.proof_cross_geo === true ? false : true })} label="Cross-geo proof" color="#38bdf8" small />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <FieldGroup label="TEST ORDER POSSIBLE">
+              <select value={p.test_order_possible === null || p.test_order_possible === undefined ? "unknown" : p.test_order_possible ? "yes" : "no"} onChange={e => onUpdate({ test_order_possible: e.target.value === "unknown" ? null : e.target.value === "yes" })} style={inputStyle}>
+                <option value="unknown">unknown</option>
+                <option value="yes">yes</option>
+                <option value="no">no</option>
+              </select>
+            </FieldGroup>
+            <FieldGroup label="TEST ORDER ATTEMPTED">
+              <div style={{ display: "flex", gap: 6 }}>
+                <ToggleButton active={p.test_order_attempted === true} onClick={() => onUpdate({ test_order_attempted: true })} label="YES" color="#10b981" small />
+                <ToggleButton active={p.test_order_attempted === false} onClick={() => onUpdate({ test_order_attempted: false })} label="NO" color="#ef4444" small />
+              </div>
+            </FieldGroup>
+            <FieldGroup label="TEST ORDER RESULT">
+              <select value={p.test_order_result || ""} onChange={e => onUpdate({ test_order_result: e.target.value || null })} style={inputStyle}>
+                <option value="">Not set</option>
+                <option value="good">good</option>
+                <option value="mixed">mixed</option>
+                <option value="bad">bad</option>
+                <option value="not_applicable">not_applicable</option>
+              </select>
+            </FieldGroup>
+          </div>
+          <FieldGroup label="TEST ORDER NOTE">
+            <EditableTextArea value={p.test_order_note} onChange={v => onUpdate({ test_order_note: v })} placeholder="What happened in the test order check?" />
+          </FieldGroup>
+          <FieldGroup label="PROOF SUMMARY">
+            <EditableTextArea value={p.proof_summary} onChange={v => onUpdate({ proof_summary: v })} placeholder="Summarize the competition/proof evidence." />
+          </FieldGroup>
+        </div>
+
+        <div style={{ marginTop: 12, border: "1px solid #1e293b", borderRadius: 10, padding: 10, background: "#0f0f1a" }}>
+          <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.06em", marginBottom: 8 }}>DECISION SUPPORT</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <FieldGroup label="DECISION STATUS">
+              <select value={p.decision_status || ""} onChange={e => onUpdate({ decision_status: e.target.value || null })} style={inputStyle}>
+                <option value="">Not set</option>
+                <option value="hold">hold</option>
+                <option value="research_deeper">research_deeper</option>
+                <option value="approved">approved</option>
+                <option value="killed">killed</option>
+              </select>
+            </FieldGroup>
+            <FieldGroup label="PRIORITY RANK">
+              <EditableNumber value={p.priority_rank} onChange={v => onUpdate({ priority_rank: v })} />
+            </FieldGroup>
+            <FieldGroup label="PROOF OWNER">
+              <EditableInput value={p.proof_owner} onChange={v => onUpdate({ proof_owner: v })} placeholder="Owner initials/name" />
+            </FieldGroup>
+            <FieldGroup label="MISSING PROOF">
+              <EditableInput value={p.missing_proof} onChange={v => onUpdate({ missing_proof: v })} placeholder="What proof is still missing?" />
+            </FieldGroup>
+            <FieldGroup label="PROOF REVISIT DATE">
+              <input type="date" value={p.proof_revisit_date || ""} onChange={e => onUpdate({ proof_revisit_date: e.target.value || null })} style={inputStyle} />
+            </FieldGroup>
+            <FieldGroup label="EXECUTION DEPENDENCE">
+              <div style={{ display: "flex", gap: 6 }}>
+                <ToggleButton active={p.execution_dependence_flag === true} onClick={() => onUpdate({ execution_dependence_flag: true })} label="YES" color="#f59e0b" small />
+                <ToggleButton active={p.execution_dependence_flag === false} onClick={() => onUpdate({ execution_dependence_flag: false })} label="NO" color="#10b981" small />
+              </div>
+            </FieldGroup>
+          </div>
+        </div>
+      </div>
+
+      {isHoldRange && (
+        <div style={{ border: `1px solid ${holdMissing.length ? "#f59e0b66" : "#1e293b"}`, borderRadius: 10, padding: "10px 12px", background: holdMissing.length ? "#f59e0b12" : "#0f0f1a", color: holdMissing.length ? "#fbbf24" : "#94a3b8", fontSize: 11 }}>
+          HOLD reminder: capture <strong>missing_proof</strong>, <strong>proof_owner</strong>, and <strong>proof_revisit_date</strong>.
+          {holdMissing.length ? ` Missing: ${holdMissing.join(", ")}` : " All hold-tracking fields are set."}
+        </div>
+      )}
     </div>
   );
 }
@@ -1994,6 +2282,10 @@ function SampleTab({ product: p, onUpdate }) {
       <FieldGroup label="SAMPLE NOTES">
         <EditableTextArea value={p.sample_notes} onChange={v => onUpdate({ sample_notes: v })} placeholder="Notes about the physical sample..." />
       </FieldGroup>
+
+      <FieldGroup label="SAMPLE VALIDATION FOCUS">
+        <EditableTextArea value={p.sample_validation_focus} onChange={v => onUpdate({ sample_validation_focus: v })} placeholder="What specifically should this sample validate?" />
+      </FieldGroup>
     </div>
   );
 }
@@ -2002,10 +2294,7 @@ function SampleTab({ product: p, onUpdate }) {
 // TAB: ECONOMICS
 // ============================================================
 function EconomicsTab({ product: p, onUpdate }) {
-  const margin = p.aov && p.cogs != null && p.shipping_cost != null
-    ? p.aov - p.cogs - p.shipping_cost - (p.aov * 0.0425)
-    : null;
-  const marginPct = margin !== null && p.aov > 0 ? (margin / p.aov) * 100 : null;
+  const { margin, marginPct } = getMarginMetrics(p);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -2063,6 +2352,40 @@ function EconomicsTab({ product: p, onUpdate }) {
           <EditableInput value={p.backup_supplier} onChange={v => onUpdate({ backup_supplier: v })} placeholder="Backup supplier..." />
         </FieldGroup>
       </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+        <FieldGroup label="ECONOMICS CONFIDENCE">
+          <select value={p.economics_confidence || ""} onChange={e => onUpdate({ economics_confidence: e.target.value || null })} style={inputStyle}>
+            <option value="">Not set</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </FieldGroup>
+        <FieldGroup label="TARGET MARKET FEASIBLE">
+          <div style={{ display: "flex", gap: 8 }}>
+            <ToggleButton active={p.target_market_feasible === true} onClick={() => onUpdate({ target_market_feasible: true })} label="YES" color="#10b981" />
+            <ToggleButton active={p.target_market_feasible === false} onClick={() => onUpdate({ target_market_feasible: false })} label="NO" color="#ef4444" />
+          </div>
+        </FieldGroup>
+      </div>
+
+      <FieldGroup label="ECONOMICS NOTE">
+        <EditableTextArea value={p.economics_note} onChange={v => onUpdate({ economics_note: v })} placeholder="Confidence rationale, assumptions, and risks..." />
+      </FieldGroup>
+
+      <FieldGroup label="SUPPLIER CONFIDENCE NOTE">
+        <EditableTextArea value={p.supplier_confidence_note} onChange={v => onUpdate({ supplier_confidence_note: v })} placeholder="Why this supplier setup is reliable (or not)." />
+      </FieldGroup>
+
+      <div style={{ border: "1px solid #1e293b", borderRadius: 12, padding: 14, background: "#141420" }}>
+        <div style={{ fontSize: 10, color: "#64748b", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 8 }}>SOURCE CHECK</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <ToggleButton active={p.source_check_passed === true} onClick={() => onUpdate({ source_check_passed: true })} label="PASS" color="#10b981" />
+          <ToggleButton active={p.source_check_passed === false} onClick={() => onUpdate({ source_check_passed: false })} label="FAIL" color="#ef4444" />
+        </div>
+        <EditableTextArea value={p.source_check_notes} onChange={v => onUpdate({ source_check_notes: v })} placeholder="Source check notes (MOQ, reliability, lead time, etc.)" />
+      </div>
     </div>
   );
 }
@@ -2112,6 +2435,7 @@ function TimelineTab({ product: p }) {
 // ============================================================
 function AddProductModal({ onClose, onAdd }) {
   const [name, setName] = useState("");
+  const [productCode, setProductCode] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
   const [notes, setNotes] = useState("");
   const [platform, setPlatform] = useState("");
@@ -2137,6 +2461,10 @@ function AddProductModal({ onClose, onAdd }) {
           <FieldGroup label="PRODUCT NAME *">
             <input value={name} onChange={e => setName(e.target.value)} placeholder="Product name..."
               style={{ ...inputStyle, fontSize: 14 }} autoFocus />
+          </FieldGroup>
+          <FieldGroup label="PRODUCT CODE (Optional)">
+            <input value={productCode} onChange={e => setProductCode(e.target.value.toUpperCase())} placeholder="AUTO if left blank..."
+              style={inputStyle} />
           </FieldGroup>
           <FieldGroup label="SOURCE URL">
             <input value={sourceUrl} onChange={e => setSourceUrl(e.target.value)} placeholder="https://..."
@@ -2171,7 +2499,8 @@ function AddProductModal({ onClose, onAdd }) {
           </button>
           <button onClick={() => {
             if (!name.trim()) return;
-            onAdd({ name, source_url: sourceUrl, notes, target_platform: platform, target_geography: geo, target_angle: angle });
+            const code = productCode.trim() || createProductCode(name);
+            onAdd({ name, product_code: code, source_url: sourceUrl, notes, target_platform: platform, target_geography: geo, target_angle: angle });
           }} style={{
             background: name.trim() ? "linear-gradient(135deg, #e94560, #c62a40)" : "#1e293b",
             color: name.trim() ? "#fff" : "#475569",
