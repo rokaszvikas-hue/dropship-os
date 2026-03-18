@@ -3,6 +3,7 @@ import { supabase } from "./lib/supabase";
 import ContentFactory from "./ContentFactory";
 import Distribution from "./Distribution";
 import StoreOrders from "./StoreOrders";
+import KnowledgeBase from "./KnowledgeBase";
 
 // ============================================================
 // CONSTANTS & CONFIG
@@ -185,7 +186,7 @@ export default function App() {
   const [isWriting, setIsWriting] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [syncError, setSyncError] = useState("");
-  const [view, setView] = useState("pipeline"); // pipeline | command | content_factory | distribution | store_orders
+  const [view, setView] = useState("pipeline"); // pipeline | command | content_factory | distribution | store_orders | knowledge_base
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showKillModal, setShowKillModal] = useState(null);
@@ -470,6 +471,7 @@ export default function App() {
           <NavTab active={view === "content_factory"} onClick={() => setView("content_factory")} label="Content Factory" icon="🎬" />
           <NavTab active={view === "distribution"} onClick={() => setView("distribution")} label="Distribution" icon="📡" />
           <NavTab active={view === "store_orders"} onClick={() => setView("store_orders")} label="Store & Orders" icon="🏪" />
+          <NavTab active={view === "knowledge_base"} onClick={() => setView("knowledge_base")} label="Knowledge Base" icon="📚" />
         </div>
         <button
           onClick={() => setShowAddModal(true)}
@@ -554,6 +556,7 @@ export default function App() {
             {view === "content_factory" && <ContentFactory />}
             {view === "distribution" && <Distribution />}
             {view === "store_orders" && <StoreOrders />}
+            {view === "knowledge_base" && <KnowledgeBase />}
           </>
         )}
       </div>
