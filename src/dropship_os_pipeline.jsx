@@ -260,11 +260,16 @@ export default function App() {
   }, [products, selectedProductId]);
 
   const logProductActivity = useCallback(async ({ productId, action, fromStage = null, toStage = null, meta = {} }) => {
+    const detailPayload = { fromStage, toStage, ...meta };
     const attempts = [
+      // Try minimal payloads first for older/narrow schemas.
+      { product_id: productId, action },
+      { product_id: productId, activity_type: action },
+      { product_id: productId, event: action },
+      // Try richer payloads when those columns exist.
       { product_id: productId, action, from_stage: fromStage, to_stage: toStage, meta },
-      { product_id: productId, activity_type: action, details: { fromStage, toStage, ...meta } },
-      { product_id: productId, event: action, payload: { fromStage, toStage, ...meta } },
-      { product_id: productId, description: action, details: { fromStage, toStage, ...meta } },
+      { product_id: productId, activity_type: action, details: detailPayload },
+      { product_id: productId, event: action, payload: detailPayload },
     ];
 
     let lastError = null;
